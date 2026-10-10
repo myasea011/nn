@@ -1,0 +1,197 @@
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    repeat task.wait(0.2) until Players.LocalPlayer
+    LocalPlayer = Players.LocalPlayer
+end
+
+repeat task.wait(0.2) until LocalPlayer:GetAttribute("__LOADED")
+
+local Config = {
+    WebhookURL = getgenv().GemsWebhookURL or "https://discord.com/api/webhooks/1558614952887976066/c7HieZkzctcpgnUAT_xRNmBF6J_XkbApRPpdeXeBM6rfF5g53WQ5iiqkaXBCOpM3VZJE",
+    Interval   = tonumber(getgenv().GemsInterval) or 60,
+    EmbedColor = 0x5F9EAD,
+    SendIfNoChange = true,
+}
+
+if getgenv()._GemsTrackerRunning then
+    getgenv()._StopGemsTracker = true
+    task.wait(1)
+end
+getgenv()._GemsTrackerRunning = true
+getgenv()._StopGemsTracker = false
+
+local env = (getgenv and getgenv()) or (getfenv and getfenv()) or _G
+local httpRequest = env.request or env.http_request or (env.syn and env.syn.request) or (env.http and env.http.request)
+
+local CurrencyCmds = nil
+local SaveModule = nil
+local req = require
+
+pcall(function()
+    local library = ReplicatedStorage:WaitForChild("Library", 5)
+    if library then
+        local client = library:FindFirstChild("Client")
+        if client then
+            local cCmds = client:FindFirstChild("CurrencyCmds")
+            if cCmds then
+                local ok, mod = pcall(req, cCmds)
+                if ok and mod then CurrencyCmds = mod end
+            end
+            local sMod = client:FindFirstChild("Save")
+            if sMod then
+                local ok, mod = pcall(req, sMod)
+                if ok and mod then SaveModule = mod end
+            end
+        end
+    end
+end)
+
+local function FormatCommas(n)
+    n = tonumber(n) or 0
+    local isNegative = n < 0
+    local formatted = tostring(math.abs(math.floor(n)))
+    local k
+    while true do
+        formatted, k = string.gsub(formatted, "^(-?%d+)(%d%d%d)", "%1,%2")
+        if k == 0 then break end
+    end
+    return (isNegative and "-" or "") .. formatted
+end
+
+local function FormatCompact(n)
+    n = tonumber(n) or 0
+    local absN = math.abs(n)
+    local sign = n < 0 and "-" or ""
+    if absN >= 1e12 then return string.format("%s%.2fT", sign, absN / 1e12)
+    elseif absN >= 1e9 then return string.format("%s%.2fB", sign, absN / 1e9)
+    elseif absN >= 1e6 then return string.format("%s%.2fM", sign, absN / 1e6)
+    elseif absN >= 1e3 then return string.format("%s%.2fK", sign, absN / 1e3)
+    else return string.format("%s%d", sign, math.floor(absN)) end
+end
+
+local function GetCurrentDiamonds()
+    if CurrencyCmds and CurrencyCmds.Get then
+        local amt = nil
+        pcall(function() amt = CurrencyCmds.Get("Diamonds") end)
+        if type(amt) == "number" then return amt end
+    end
+
+    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+    if leaderstats then
+        local dVal = leaderstats:FindFirstChild("💎 Diamonds") or leaderstats:FindFirstChild("Diamonds")
+        if dVal and type(dVal.Value) == "number" then
+            return dVal.Value
+        end
+    end
+
+    if SaveModule and SaveModule.Get then
+        local total = 0
+        local ok = pcall(function()
+            local data = SaveModule.Get(LocalPlayer) or SaveModule.Get()
+            if data and data.Inventory and data.Inventory.Currency then
+                for _, item in pairs(data.Inventory.Currency) do
+                    if type(item) == "table" and item.id == "Diamonds" then
+                        total = item._am or item.am or 0
+                        break
+                    end
+                end
+            end
+        end)
+        if ok and total > 0 then return total end
+    end
+
+    return 0
+end
+
+local function SendWebhookPayload(currentGems, diff, totalProfit)
+    local targetUrl = Config.WebhookURL
+    if not targetUrl or targetUrl == "" or targetUrl:find("YOUR_DISCORD_WEBHOOK_URL") then
+        return
+    end
+
+    if not httpRequest then
+        return
+    end
+
+    local diffSign = diff >= 0 and "+" or ""
+    local profitSign = totalProfit >= 0 and "+" or ""
+
+    local embed = {
+        color = Config.EmbedColor,
+        thumbnail = {
+            url = "https://biggamesapi.io/image/15258327857"
+        },
+        fields = {
+            {
+                name = "Username",
+                value = string.format("`%s`", LocalPlayer.Name),
+                inline = true
+            },
+            {
+                name = "Gems",
+                value = string.format("**%s** (%s)", FormatCommas(currentGems), FormatCompact(currentGems)),
+                inline = true
+            },
+            {
+                name = string.format("Gems trong %ds", Config.Interval),
+                value = string.format("`%s%s`", diffSign, FormatCommas(diff)),
+                inline = true
+            },
+            {
+                name = "Totals",
+                value = string.format("`%s%s`", profitSign, FormatCommas(totalProfit)),
+                inline = true
+            }
+        },
+        timestamp = DateTime.now():ToIsoDate()
+    }
+
+    local body = HttpService:JSONEncode({
+        avatar_url = string.format("https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=150&height=150&format=png", LocalPlayer.UserId),
+        embeds = { embed }
+    })
+
+    task.spawn(function()
+        pcall(function()
+            httpRequest({
+                Url = targetUrl,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = body
+            })
+        end)
+    end)
+end
+
+task.spawn(function()
+    task.wait(2)
+    local startGems = GetCurrentDiamonds()
+    local previousGems = startGems
+
+    while not getgenv()._StopGemsTracker do
+        task.wait(Config.Interval)
+        if getgenv()._StopGemsTracker then break end
+
+        local currentGems = GetCurrentDiamonds()
+        local diff = currentGems - previousGems
+        local totalProfit = currentGems - startGems
+
+        if Config.SendIfNoChange or diff ~= 0 then
+            SendWebhookPayload(currentGems, diff, totalProfit)
+        end
+
+        previousGems = currentGems
+    end
+
+    getgenv()._GemsTrackerRunning = false
+end)
